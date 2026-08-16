@@ -41,6 +41,19 @@ type DragState = {
   offsetY: number;
 };
 
+type ContentLayout = {
+  width: number;
+  align: "left" | "right";
+  pressure: number;
+  timelineWidth: number;
+  lyricsSize: number;
+};
+
+const CONTENT_CLEARANCE = 22;
+// Kept intentionally tight: content should only react once the protected
+// zones are truly about to clash, not drift/anticipate from a distance.
+const PROXIMITY_RAMP = 20;
+
 const cloneShapes = (shapes: LiquidShape[]) => shapes.map((shape) => ({ ...shape }));
 
 const clampShape = (shape: LiquidShape): LiquidShape => ({
@@ -48,6 +61,64 @@ const clampShape = (shape: LiquidShape): LiquidShape => ({
   x: Math.max(22, Math.min(STAGE_WIDTH - shape.width - 22, shape.x)),
   y: Math.max(24, Math.min(STAGE_HEIGHT - shape.height - 24, shape.y)),
 });
+
+const clamp01 = (value: number) => Math.max(0, Math.min(1, value));
+const smoothstep = (value: number) => value * value * (3 - 2 * value);
+const lerp = (start: number, end: number, amount: number) => start + (end - start) * amount;
+
+function contentLayouts(player: LiquidShape, note: LiquidShape): Record<string, ContentLayout> {
+  const playerBounds = {
+    left: player.x + 27,
+    top: player.y + 24,
+    right: player.x + player.width - 27,
+    bottom: player.y + player.height - 22,
+  };
+  const noteBounds = {
+    left: note.x + 24,
+    top: note.y + 25,
+    right: note.x + note.width - 24,
+    bottom: note.y + note.height - 24,
+  };
+  const overlapX = Math.min(playerBounds.right, noteBounds.right) - Math.max(playerBounds.left, noteBounds.left);
+  const overlapY = Math.min(playerBounds.bottom, noteBounds.bottom) - Math.max(playerBounds.top, noteBounds.top);
+
+  // A continuous 0..1 measure of how close the two protected zones are, ramping
+  // gently over PROXIMITY_RAMP px so nothing ever snaps at a hard threshold.
+  const proximity = Math.min(overlapX, overlapY);
+  const pressure = smoothstep(clamp01((proximity + PROXIMITY_RAMP) / PROXIMITY_RAMP));
+
+  const playerIsLeft = player.x + player.width / 2 <= note.x + note.width / 2;
+  const horizontalSpan = playerIsLeft
+    ? noteBounds.right - playerBounds.left
+    : playerBounds.right - noteBounds.left;
+  const playerWidth = playerBounds.right - playerBounds.left;
+  const noteWidth = noteBounds.right - noteBounds.left;
+  const availableWidth = Math.max(188, horizontalSpan - CONTENT_CLEARANCE);
+  const engagedPlayerWidth = Math.min(playerWidth, Math.max(76, availableWidth * 0.42));
+  const engagedNoteWidth = Math.min(noteWidth, Math.max(112, availableWidth - engagedPlayerWidth));
+
+  const playerWidthNow = lerp(playerWidth, engagedPlayerWidth, pressure);
+  const noteWidthNow = lerp(noteWidth, engagedNoteWidth, pressure);
+  const playerTimelineFull = playerWidth * 0.86;
+  const playerTimelineEngaged = engagedPlayerWidth * 0.64;
+
+  return {
+    player: {
+      width: playerWidthNow,
+      align: playerIsLeft ? "left" : "right",
+      pressure,
+      timelineWidth: Math.max(46, lerp(playerTimelineFull, playerTimelineEngaged, pressure)),
+      lyricsSize: 15,
+    },
+    note: {
+      width: noteWidthNow,
+      align: playerIsLeft ? "right" : "left",
+      pressure,
+      timelineWidth: 0,
+      lyricsSize: lerp(15, 17, pressure),
+    },
+  };
+}
 
 export default function Home() {
   const [shapes, setShapes] = useState<LiquidShape[]>(() => cloneShapes(INITIAL_SHAPES));
@@ -221,6 +292,7 @@ export default function Home() {
 
   const player = shapes.find((shape) => shape.id === "player")!;
   const note = shapes.find((shape) => shape.id === "note")!;
+  const layouts = contentLayouts(player, note);
 
   const shapeStyle = (shape: LiquidShape): CSSProperties => ({
     left: shape.x,
@@ -228,6 +300,14 @@ export default function Home() {
     width: shape.width,
     height: shape.height,
     borderRadius: shape.radius,
+  });
+
+  const contentStyle = (id: string): CSSProperties => ({
+    "--content-width": `${layouts[id].width}px`,
+    "--content-margin-left": layouts[id].align === "right" ? "auto" : "0",
+    "--content-pressure": layouts[id].pressure,
+    "--timeline-width": `${layouts[id].timelineWidth}px`,
+    "--lyrics-size": `${layouts[id].lyricsSize}px`,
   });
 
   return (
@@ -260,18 +340,20 @@ export default function Home() {
               role="group"
               aria-label="Draggable music card. Drag it, or use the arrow keys."
             >
-              <div className="card-header">
-                <span className="card-kicker card-kicker--light">NOW PLAYING</span>
-              </div>
-              <div className="player-main">
-                <div className="album-art" aria-hidden="true" />
-                <div>
-                  <h2>petal</h2>
-                  <p>ariana grande</p>
+              <div className="card-content" style={contentStyle("player")}>
+                <div className="card-header">
+                  <span className="card-kicker card-kicker--light">NOW PLAYING</span>
                 </div>
+                <div className="player-main">
+                  <div className="album-art" aria-hidden="true" />
+                  <div>
+                    <h2>petal</h2>
+                    <p>ariana grande</p>
+                  </div>
+                </div>
+                <div className="timeline"><span /></div>
+                <div className="time-row"><span>1:24</span><span>3:04</span></div>
               </div>
-              <div className="timeline"><span /></div>
-              <div className="time-row"><span>1:24</span><span>3:04</span></div>
             </article>
 
             <article
@@ -286,14 +368,16 @@ export default function Home() {
               role="group"
               aria-label="Draggable note card. Drag it, or use the arrow keys."
             >
-              <div className="note-icon" aria-hidden="true">
-                <svg viewBox="0 0 24 24"><path d="M6 8.5h12M6 12h8M6 15.5h5" /></svg>
-              </div>
-              <div className="lyrics-stack">
-                <span className="card-kicker card-kicker--light">LYRICS</span>
-                <div className="lyrics-lines" aria-label="Lyrics lines">
-                  <p className="lyrics-line lyrics-line--active">all of my favorite stories</p>
-                  <p className="lyrics-line lyrics-line--muted">end in some kind of catastrophe</p>
+              <div className="card-content" style={contentStyle("note")}>
+                <div className="note-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24"><path d="M6 8.5h12M6 12h8M6 15.5h5" /></svg>
+                </div>
+                <div className="lyrics-stack">
+                  <span className="card-kicker card-kicker--light">LYRICS</span>
+                  <div className="lyrics-lines" aria-label="Lyrics lines">
+                    <p className="lyrics-line lyrics-line--active">all of my favorite stories</p>
+                    <p className="lyrics-line lyrics-line--muted">end in some kind of catastrophe</p>
+                  </div>
                 </div>
               </div>
             </article>
